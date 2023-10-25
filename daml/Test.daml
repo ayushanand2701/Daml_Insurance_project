@@ -1,0 +1,226 @@
+module Test where
+
+import DA.Date (date, Month(Oct))
+import Insurance
+import Daml.Script
+import DA.Foldable (forA_)
+
+-- User setup
+setupUser : Text -> Script Party
+setupUser name = script do
+    -- Allocate party
+    allocatedParty <- allocatePartyWithHint name (PartyIdHint name)
+
+    -- Validate user 
+    userId <- validateUserId name
+    
+    -- Create user object 
+    createUser (User userId (Some allocatedParty)) [CanActAs allocatedParty]
+    return allocatedParty
+
+--test setup
+setup : Script ()
+setup = script do
+    -- user_setup_begin
+    customer <- setupUser "Customer" 
+    insurer <- setupUser "Insurer" 
+
+    return()
+------------------------------------------------------------
+--Full Path Testing
+------------------------------------------------------
+enquiry : Script ()
+enquiry = script do
+    -- user_setup_begin
+    customer <- setupUser "Customer" 
+    insurer<- setupUser "Insurer" 
+    
+    --Customer perform insurance enquiry for insurance type = Individuals
+    enquiry1 <- submit customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = insurer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=Individuals
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=20
+            mode=Yearly
+
+    --Customer perform insurance enquiry for insurance type = Family
+    enquiry2 <- submit customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = insurer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=Family
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=20
+            mode=Yearly
+    
+    --Customer perform insurance enquiry for insurance type = SeniorCitizens
+    enquiry3 <- submit customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = insurer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=SeniorCitizens
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=20
+            mode=Yearly
+
+    ---Unhappy Path - Policy tenure<100
+    unhappy1 <- submitMustFail customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = insurer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=SeniorCitizens
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=200
+            mode=Yearly
+
+    ---Unhappy Path - Policy tenure>0
+    unhappy2 <- submitMustFail customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = insurer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=SeniorCitizens
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=0
+            mode=Yearly
+
+
+    ---Unhappy Path - Customer and Insurer should not be same
+    unhappy3 <- submitMustFail customer do
+        createCmd InsuranceApplication with 
+            customer = customer        
+            insurer = customer
+            city="Bengaluru"
+            phone=9901844444
+            dob=date 2000 Oct 13
+            email=Some "cust@dxc.come"
+            iType=SeniorCitizens
+            pIllness=None
+            sumInsuredAmount=1000000.00
+            policyTenure=40
+            mode=Yearly
+
+    --Insurer submit proposal for enquiry 1
+    quote1 <- submit insurer do
+        exerciseCmd enquiry1 ProvideQuote 
+            with 
+                id = "Policy001"
+                premium = 20000.00
+
+    --Insurer submit proposal for enquiry 2
+    quote2 <- submit insurer do
+        exerciseCmd enquiry2 ProvideQuote 
+            with 
+                id = "Policy002"
+                premium = 30000.00
+    
+    --Insurer submit proposal for enquiry 3
+    --Unhappy Path - preimum >0
+    unhappy4 <- submitMustFail insurer do
+        exerciseCmd enquiry3 ProvideQuote 
+            with 
+                id = "Policy003"
+                premium = 0.00
+
+    quote3 <- submit insurer do
+        exerciseCmd enquiry3 ProvideQuote 
+            with 
+                id = "Policy003"
+                premium = 40000.00
+
+--    x<-query @InsruanceProposal insurer
+--    debug (x)
+
+    --Customer accept the quote 1 proposal
+    policy1 <- submit customer do
+        exerciseCmd quote1 AcceptProposal with startDate = date 2023 Oct 13
+
+    
+    --Insurer confirm all payment
+--    x<-queryFilter @Payment insurer (\cI -> cI.receiver==insurer)
+--    debug x
+
+    
+        
+    ---Customer reject the quote 2 proposal
+    proposalRejectCId <- submit customer do
+        exerciseCmd quote2 RejectProposal
+
+    --Some(policy1,_)<-queryContractKey @InsruancePolicy customer ("Policy001",customer,insurer)
+    --debug $policy1
+    
+
+    --Customer accept the quote 3 proposal
+    policy3 <- submit customer do
+        exerciseCmd quote3 AcceptProposal with startDate = date 2023 Oct 13
+
+    --Insuer init MedicalCheckup for Policy001
+    medical_policy1 <- submit insurer do
+        exerciseCmd policy1 MedicalCheckup with checkupDate = date 2023 Oct 23, center="Appolo"
+
+    --Insuer init MedicalCheckup for Policy003
+    medical_policy3 <- submit insurer do
+        exerciseCmd policy3 MedicalCheckup with checkupDate = date 2023 Oct 24, center="DrPathlab"
+
+    --Customer complete the medical checkup for Policy 1
+    completed_medical_policy1 <- submit customer do
+        exerciseCmd medical_policy1 Completed 
+
+
+    --Customer complete the medical checkup for Policy 3
+    completed_medica3_policy1 <- submit customer do
+        exerciseCmd medical_policy3 Completed 
+
+
+    --Insurer confirm all payment
+    x <-queryFilter @Payment insurer (\cI -> cI.receiver==insurer)
+    --forA_ x (\i->debug i._1)
+    forA_ x (\i->do submit insurer do exerciseCmd i._1 ConfirmPayment)  
+
+
+    --Customer renew policy 1
+    policy1<- submit customer do
+        exerciseCmd policy1 Renew 
+
+
+    --Insurer confirm the payment
+    Some(paymentId,_)<-queryContractKey @Payment insurer (customer,insurer,"Policy001")
+    proposal1 <- submit insurer do
+        exerciseCmd paymentId ConfirmPayment 
+
+    --Customer Cancel Policy3 during free period
+    refund_policy3<- submit customer do
+        exerciseCmd policy3 CancelPolicy with reason = "Premium is too high!!"
+
+    --Insurere Approe refund for Policy 3
+    approve_refund_policy3<- submit insurer do
+        exerciseCmd refund_policy3 ApproveCancellation 
+
+
+    pure()

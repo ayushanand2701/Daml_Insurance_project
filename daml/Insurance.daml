@@ -1,0 +1,278 @@
+module Insurance where
+
+import DA.Date (addDays, toDateUTC)
+
+data InsuranceType = Individuals|Family|SeniorCitizens deriving(Show,Eq)
+data PreExistingIllness = Cancer|Diabetes|Heart deriving(Show,Eq)
+data PolicyStatus = Active|Grace|Free|Lapses deriving(Show,Eq)
+data PaymentMode = Monthly|Quarterly|Yearly|BiAnnual deriving(Show,Eq)
+
+--Insurance Application
+template InsuranceApplication
+    with
+        customer:Party
+        insurer:Party
+       
+        city:Text
+        phone:Int
+        dob:Date
+        email:Optional Text
+        iType:InsuranceType 
+        pIllness:Optional PreExistingIllness
+        sumInsuredAmount:Decimal
+        policyTenure:Int
+        mode:PaymentMode
+    where
+        signatory customer
+        observer insurer
+
+        ensure (policyTenure>0 && policyTenure<100 && customer/=insurer)
+
+        key(customer,iType,insurer):(Party,InsuranceType,Party)
+        maintainer key._1
+
+        --Customer submit application
+        choice SubmitApplication:ContractId InsuranceApplication
+            with
+                city:Text
+                phone:Int
+                dob:Date
+                email:Optional Text
+                iType:InsuranceType 
+                pIllness:PreExistingIllness
+                sumInsuredAmount:Decimal
+                policyTenure:Int
+                mode:PaymentMode
+            controller customer
+            do
+                create this 
+                    with 
+                        city = city
+                        phone=phone
+                        dob=dob
+                        email=email
+                        iType=iType
+                        pIllness=Some pIllness
+                        sumInsuredAmount=sumInsuredAmount
+                        policyTenure=policyTenure
+                        mode = mode
+
+        --Insurere provide quote
+        choice ProvideQuote:ContractId InsruanceProposal
+            with
+                id:Text
+                premium:Decimal
+            controller insurer
+            do
+                assertMsg "Preimum must be greter than 0" (premium>0.0)
+
+                create InsruanceProposal 
+                    with
+                        proposal = this
+                        policyId=id
+                        premium = premium
+
+--Insruance Proposal template
+template InsruanceProposal
+    with
+        policyId:Text
+        proposal:InsuranceApplication
+        premium:Decimal
+    where
+        
+        ensure premium>0.0
+
+        signatory proposal.insurer
+        observer proposal.customer
+
+        --Accept proposal
+        choice AcceptProposal:ContractId InsruancePolicy
+            with
+                startDate:Date
+            controller proposal.customer
+            do
+                now <- getTime 
+                let nowDate = toDateUTC now
+
+                create Payment 
+                    with
+                    issuer = proposal.customer
+                    receiver = proposal.insurer
+                    amount=premium
+                    reference=policyId
+                    paymentDate= nowDate
+
+                create InsruancePolicy 
+                    with
+                        startDate = nowDate      
+                        renewDate = getNextRewnwDate startDate proposal.mode
+                        policy=this           
+        
+        --Reject proposal
+        choice RejectProposal:()
+            controller proposal.customer
+                do
+                    return()
+
+-------------------------------------------------------
+--Insurance policy template
+template InsruancePolicy
+    with
+        policy:InsruanceProposal
+        startDate:Date
+        --lastPaymentDate:Date
+        renewDate:Date 
+        --status :
+    where
+        signatory policy.proposal.customer,policy.proposal.insurer
+
+        key(policy.policyId,policy.proposal.customer,policy.proposal.insurer):(Text,Party,Party)
+        maintainer key._3
+
+        --customer can renew policyg        
+        --nonconsuming choice Renew:ContractId InsruancePolicy
+        choice Renew:ContractId InsruancePolicy
+            controller policy.proposal.customer
+                do
+                    now <- getTime 
+                    let nowDate = toDateUTC now
+
+                    create Payment 
+                        with
+                        issuer = policy.proposal.customer
+                        receiver = policy.proposal.insurer
+                        amount=policy.premium
+                        reference=policy.policyId
+                        paymentDate=nowDate
+
+
+                    create this with 
+                        renewDate = getNextRewnwDate renewDate policy.proposal.mode
+
+        --Customer can cancel police during free period
+        choice CancelPolicy:ContractId RefundProposal
+            with
+                reason:Text
+            controller policy.proposal.customer
+                do 
+                    create RefundProposal with
+                        createdBy = policy.proposal.customer
+                        approver = policy.proposal.insurer
+                        reason = reason
+                        proposal=this
+
+
+                    --return()
+        
+        --Insurer can terminate policy
+        choice TerminatePolicy:()
+            with
+                reason:Text
+            controller policy.proposal.insurer
+                do 
+                    create RefundProposal with
+                        createdBy = policy.proposal.insurer
+                        approver =  policy.proposal.insurer
+                        reason = reason
+                        proposal=this
+
+                    return ()                     
+
+        --Insurer init medical checkup request
+        nonconsuming choice MedicalCheckup:ContractId MedicalRequisition
+            with
+                checkupDate:Date
+                center:Text
+            controller policy.proposal.insurer
+            do
+                create MedicalRequisition with
+                    insurer=policy.proposal.insurer
+                    customer=policy.proposal.customer
+                    medicalRecordId=policy.policyId
+                    checkupDate = checkupDate
+                    diagnosisCenter=center
+
+
+
+--Cancellation Policy Details
+template RefundProposal
+    with
+        createdBy:Party
+        approver:Party
+        reason:Text
+        proposal:InsruancePolicy
+    where
+        signatory createdBy
+        observer  proposal.policy.proposal.customer,approver
+        key(proposal,createdBy,approver):(InsruancePolicy,Party,Party)
+        maintainer key._2
+        
+        --Approve Cancellation
+        choice ApproveCancellation:()
+            controller approver
+            do
+                now <- getTime 
+                let nowDate = toDateUTC now
+
+                create Payment 
+                        with
+                            issuer = proposal.policy.proposal.insurer
+                            receiver = proposal.policy.proposal.customer
+                            amount=proposal.policy.premium
+                            reference=proposal.policy.policyId
+                            paymentDate=nowDate
+
+                return()
+
+--Medical Requisition Form template
+template MedicalRequisition
+    with
+        insurer:Party
+        customer:Party
+
+        medicalRecordId:Text
+        checkupDate:Date
+        diagnosisCenter:Text
+    where
+        signatory insurer
+        observer customer
+        
+        key(insurer,customer,medicalRecordId):(Party,Party,Text)
+        maintainer key._1
+
+        choice Completed:()
+            controller customer
+            do return()
+
+--Payment template
+template Payment
+    with
+        issuer:Party
+        receiver:Party
+
+        amount:Decimal
+        reference:Text
+        paymentDate:Date
+
+    where
+        signatory issuer
+        observer receiver
+
+        key(issuer,receiver,reference):(Party,Party,Text)
+        maintainer key._1
+
+        choice ConfirmPayment:()
+            controller receiver
+            do return()
+
+
+--Calculate renew date based on payment mode
+getNextRewnwDate:Date->PaymentMode->Date
+getNextRewnwDate iDate iMode = case(iMode) of
+    Monthly->addDays iDate 30
+    Quarterly->addDays iDate 90
+    Yearly->addDays iDate 365
+    BiAnnual->addDays iDate 182
+
+
+
